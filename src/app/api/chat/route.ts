@@ -1,5 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import * as Sentry from '@sentry/nextjs'
+import { Timer } from '@/lib/sentry-utils'
 
 const SYSTEM_PROMPT = `You are a helpful personal assistant designed to help with general research, questions, and tasks.
 
@@ -23,12 +24,29 @@ interface MessageInput {
 }
 
 export async function POST(request: Request) {
+  const requestTimer = new Timer()
+  const requestId = crypto.randomUUID()
+
+  // Set request context
+  Sentry.setContext('api_request', {
+    request_id: requestId,
+    endpoint: '/api/chat',
+    method: 'POST',
+    timestamp: new Date().toISOString()
+  })
+
+  Sentry.logger.info('Chat API request received', {
+    request_id: requestId
+  })
+
   try {
     const { messages } = await request.json() as { messages: MessageInput[] }
 
     if (!messages || !Array.isArray(messages)) {
-      Sentry.logger.warn('Chat request received with invalid messages payload')
-      Sentry.metrics.increment('chat.requests', 1, { tags: { status: 'invalid' } })
+      Sentry.logger.warning('Invalid request: missing messages array', {
+        request_id: requestId
+      })
+
       return new Response(
         JSON.stringify({ error: 'Messages array is required' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
@@ -38,17 +56,32 @@ export async function POST(request: Request) {
     // Get the last user message
     const lastUserMessage = messages.filter(m => m.role === 'user').pop()
     if (!lastUserMessage) {
-      Sentry.logger.warn('Chat request received with no user message')
-      Sentry.metrics.increment('chat.requests', 1, { tags: { status: 'invalid' } })
+      Sentry.logger.warning('Invalid request: no user message', {
+        request_id: requestId,
+        message_count: messages.length
+      })
+
       return new Response(
         JSON.stringify({ error: 'No user message found' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       )
     }
 
-    Sentry.logger.info('Chat request received with %d messages', [messages.length])
-    Sentry.metrics.increment('chat.requests', 1, { tags: { status: 'started' } })
-    Sentry.metrics.distribution('chat.messages_per_request', messages.length)
+    Sentry.logger.info('Processing chat query', {
+      request_id: requestId,
+      message_count: messages.length,
+      message_preview: lastUserMessage.content.substring(0, 50)
+    })
+
+    Sentry.addBreadcrumb({
+      category: 'api',
+      message: 'Starting Claude query',
+      level: 'info',
+      data: {
+        request_id: requestId,
+        message_count: messages.length
+      }
+    })
 
     // Build conversation context
     const conversationContext = messages
@@ -60,11 +93,21 @@ export async function POST(request: Request) {
       ? `${SYSTEM_PROMPT}\n\nPrevious conversation:\n${conversationContext}\n\nUser: ${lastUserMessage.content}`
       : `${SYSTEM_PROMPT}\n\nUser: ${lastUserMessage.content}`
 
+    let streamedEvents = 0
+    let toolsExecuted = 0
+    let textChunks = 0
+
     // Create a streaming response
     const encoder = new TextEncoder()
     const stream = new ReadableStream({
       async start(controller) {
+        const streamTimer = new Timer()
+
         try {
+          Sentry.logger.debug('Stream started', {
+            request_id: requestId
+          })
+
           // Use the claude-agent-sdk query function with all default tools enabled
           for await (const message of query({
             prompt: fullPrompt,
@@ -81,14 +124,26 @@ export async function POST(request: Request) {
               cwd: process.cwd(),
             }
           })) {
+            streamedEvents++
+
             // Handle streaming text deltas (partial messages)
             if (message.type === 'stream_event' && 'event' in message) {
               const event = message.event
               // Handle content block delta events for text streaming
               if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+                textChunks++
                 controller.enqueue(encoder.encode(
                   `data: ${JSON.stringify({ type: 'text_delta', text: event.delta.text })}\n\n`
                 ))
+
+                // Log every 50 chunks to avoid spam
+                if (textChunks % 50 === 0) {
+                  Sentry.logger.debug('Streaming progress', {
+                    request_id: requestId,
+                    text_chunks: textChunks,
+                    elapsed_ms: streamTimer.elapsed()
+                  })
+                }
               }
             }
 
@@ -98,8 +153,24 @@ export async function POST(request: Request) {
               if (Array.isArray(content)) {
                 for (const block of content) {
                   if (block.type === 'tool_use') {
-                    Sentry.logger.info('Agent tool invoked: %s', [block.name])
-                    Sentry.metrics.increment('chat.tool_invocations', 1, { tags: { tool: block.name } })
+                    toolsExecuted++
+
+                    Sentry.logger.info('Tool execution started', {
+                      request_id: requestId,
+                      tool_name: block.name,
+                      tool_count: toolsExecuted
+                    })
+
+                    Sentry.addBreadcrumb({
+                      category: 'tool',
+                      message: `Tool execution: ${block.name}`,
+                      level: 'info',
+                      data: {
+                        request_id: requestId,
+                        tool_name: block.name
+                      }
+                    })
+
                     controller.enqueue(encoder.encode(
                       `data: ${JSON.stringify({ type: 'tool_start', tool: block.name })}\n\n`
                     ))
@@ -117,8 +188,32 @@ export async function POST(request: Request) {
 
             // Signal completion
             if (message.type === 'result' && message.subtype === 'success') {
-              Sentry.logger.info('Chat stream completed successfully')
-              Sentry.metrics.increment('chat.requests', 1, { tags: { status: 'success' } })
+              const streamDuration = streamTimer.stop()
+              const totalDuration = requestTimer.stop()
+
+              Sentry.logger.info('Stream completed successfully', {
+                request_id: requestId,
+                stream_duration_ms: streamDuration,
+                total_duration_ms: totalDuration,
+                events_streamed: streamedEvents,
+                tools_executed: toolsExecuted,
+                text_chunks: textChunks
+              })
+
+              Sentry.metrics.distribution('chat.api.stream_duration', streamDuration, {
+                unit: 'millisecond',
+                tags: { status: 'success', request_id: requestId }
+              })
+
+              Sentry.metrics.distribution('chat.api.total_duration', totalDuration, {
+                unit: 'millisecond',
+                tags: { status: 'success', request_id: requestId }
+              })
+
+              Sentry.metrics.distribution('chat.api.tools_per_request', toolsExecuted, {
+                tags: { request_id: requestId }
+              })
+
               controller.enqueue(encoder.encode(
                 `data: ${JSON.stringify({ type: 'done' })}\n\n`
               ))
@@ -126,8 +221,22 @@ export async function POST(request: Request) {
 
             // Handle errors
             if (message.type === 'result' && message.subtype !== 'success') {
-              Sentry.logger.error('Chat query did not complete successfully, subtype: %s', [message.subtype])
-              Sentry.metrics.increment('chat.requests', 1, { tags: { status: 'query_failure' } })
+              const streamDuration = streamTimer.stop()
+              const totalDuration = requestTimer.stop()
+
+              Sentry.logger.error('Stream failed', {
+                request_id: requestId,
+                subtype: message.subtype,
+                stream_duration_ms: streamDuration,
+                total_duration_ms: totalDuration,
+                events_streamed: streamedEvents
+              })
+
+              Sentry.metrics.distribution('chat.api.stream_duration', streamDuration, {
+                unit: 'millisecond',
+                tags: { status: 'error', request_id: requestId }
+              })
+
               controller.enqueue(encoder.encode(
                 `data: ${JSON.stringify({ type: 'error', message: 'Query did not complete successfully' })}\n\n`
               ))
@@ -137,9 +246,33 @@ export async function POST(request: Request) {
           controller.enqueue(encoder.encode('data: [DONE]\n\n'))
           controller.close()
         } catch (error) {
-          Sentry.logger.error('Chat stream error: %s', [error instanceof Error ? error.message : String(error)])
-          Sentry.metrics.increment('chat.errors', 1, { tags: { phase: 'stream' } })
-          Sentry.captureException(error)
+          const streamDuration = streamTimer.stop()
+          const totalDuration = requestTimer.stop()
+
+          Sentry.logger.error('Stream error occurred', {
+            request_id: requestId,
+            error: String(error),
+            stream_duration_ms: streamDuration,
+            total_duration_ms: totalDuration,
+            events_before_error: streamedEvents
+          })
+
+          Sentry.captureException(error, {
+            tags: {
+              endpoint: '/api/chat',
+              request_id: requestId,
+              error_location: 'stream'
+            },
+            contexts: {
+              stream_context: {
+                events_streamed: streamedEvents,
+                tools_executed: toolsExecuted,
+                text_chunks: textChunks,
+                duration_ms: streamDuration
+              }
+            }
+          })
+
           controller.enqueue(encoder.encode(
             `data: ${JSON.stringify({ type: 'error', message: 'Stream error occurred' })}\n\n`
           ))
@@ -156,9 +289,26 @@ export async function POST(request: Request) {
       },
     })
   } catch (error) {
-    Sentry.logger.error('Chat API error: %s', [error instanceof Error ? error.message : String(error)])
-    Sentry.metrics.increment('chat.errors', 1, { tags: { phase: 'request' } })
-    Sentry.captureException(error)
+    const totalDuration = requestTimer.stop()
+
+    Sentry.logger.error('Chat API error', {
+      request_id: requestId,
+      error: String(error),
+      total_duration_ms: totalDuration
+    })
+
+    Sentry.captureException(error, {
+      tags: {
+        endpoint: '/api/chat',
+        request_id: requestId,
+        error_location: 'request_parsing'
+      },
+      contexts: {
+        request_context: {
+          duration_ms: totalDuration
+        }
+      }
+    })
 
     return new Response(
       JSON.stringify({ error: 'Failed to process chat request. Check server logs for details.' }),

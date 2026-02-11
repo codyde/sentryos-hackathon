@@ -7,8 +7,10 @@ import { DesktopIcon } from './DesktopIcon'
 import { Notepad } from './apps/Notepad'
 import { FolderView, FolderItem } from './apps/FolderView'
 import { Chat } from './apps/Chat'
-import { useState } from 'react'
+import { SentryTest } from './apps/SentryTest'
+import { useState, useEffect } from 'react'
 import * as Sentry from '@sentry/nextjs'
+import { addDesktopBreadcrumb, incrementCounter, METRICS } from '@/lib/sentry-utils'
 
 const INSTALL_GUIDE_CONTENT = `# SentryOS Install Guide
 
@@ -59,9 +61,26 @@ function DesktopContent() {
   const { windows, openWindow } = useWindowManager()
   const [selectedIcon, setSelectedIcon] = useState<string | null>(null)
 
+  useEffect(() => {
+    Sentry.logger.info('Desktop initialized')
+
+    Sentry.setContext('desktop', {
+      initialized_at: new Date().toISOString()
+    })
+
+    addDesktopBreadcrumb('desktop_loaded', 'desktop')
+  }, [])
+
   const openInstallGuide = () => {
-    Sentry.logger.info('App launched: %s', ['Install Guide'])
-    Sentry.metrics.increment('app.launched', 1, { tags: { app: 'install-guide' } })
+    Sentry.logger.info('Opening Install Guide', {
+      app_type: 'notepad',
+      file: 'install-guide'
+    })
+
+    addDesktopBreadcrumb('icon_double_click', 'install-guide')
+    incrementCounter(METRICS.DESKTOP.ICON_CLICK, { icon_id: 'install-guide' })
+    incrementCounter(METRICS.DESKTOP.APP_LAUNCH, { app_type: 'notepad' })
+
     openWindow({
       id: 'install-guide',
       title: 'Install Guide.md',
@@ -79,8 +98,14 @@ function DesktopContent() {
   }
 
   const openChatWindow = () => {
-    Sentry.logger.info('App launched: %s', ['Chat'])
-    Sentry.metrics.increment('app.launched', 1, { tags: { app: 'chat' } })
+    Sentry.logger.info('Opening Chat application', {
+      app_type: 'chat'
+    })
+
+    addDesktopBreadcrumb('icon_double_click', 'chat')
+    incrementCounter(METRICS.DESKTOP.ICON_CLICK, { icon_id: 'chat' })
+    incrementCounter(METRICS.DESKTOP.APP_LAUNCH, { app_type: 'chat' })
+
     openWindow({
       id: 'chat',
       title: 'SentryOS Chat',
@@ -98,8 +123,14 @@ function DesktopContent() {
   }
 
   const openAgentsFolder = () => {
-    Sentry.logger.info('App launched: %s', ['Agents Folder'])
-    Sentry.metrics.increment('app.launched', 1, { tags: { app: 'agents-folder' } })
+    Sentry.logger.info('Opening Agents folder', {
+      app_type: 'folder_view'
+    })
+
+    addDesktopBreadcrumb('icon_double_click', 'agents-folder')
+    incrementCounter(METRICS.DESKTOP.ICON_CLICK, { icon_id: 'agents-folder' })
+    incrementCounter(METRICS.DESKTOP.APP_LAUNCH, { app_type: 'folder_view' })
+
     const agentsFolderItems: FolderItem[] = []
 
     openWindow({
@@ -118,7 +149,34 @@ function DesktopContent() {
     })
   }
 
+  const openSentryTest = () => {
+    Sentry.logger.info('Opening Sentry Test application', {
+      app_type: 'sentry_test'
+    })
+
+    addDesktopBreadcrumb('icon_double_click', 'sentry-test')
+    incrementCounter(METRICS.DESKTOP.ICON_CLICK, { icon_id: 'sentry-test' })
+    incrementCounter(METRICS.DESKTOP.APP_LAUNCH, { app_type: 'sentry_test' })
+
+    openWindow({
+      id: 'sentry-test',
+      title: 'Sentry Test',
+      icon: '🔍',
+      x: 250,
+      y: 120,
+      width: 500,
+      height: 500,
+      minWidth: 400,
+      minHeight: 400,
+      isMinimized: false,
+      isMaximized: false,
+      content: <SentryTest />
+    })
+  }
+
   const handleDesktopClick = () => {
+    Sentry.logger.debug('Desktop background clicked')
+    addDesktopBreadcrumb('background_click', 'desktop')
     setSelectedIcon(null)
   }
 
@@ -145,6 +203,14 @@ function DesktopContent() {
 
       {/* Desktop icons area - z-10 to ensure it's above windows container */}
       <div className="absolute top-4 left-4 flex flex-col gap-2 z-10" onClick={(e) => e.stopPropagation()}>
+        <DesktopIcon
+          id="sentry-test"
+          label="Sentry Test"
+          icon="application"
+          onDoubleClick={openSentryTest}
+          selected={selectedIcon === 'sentry-test'}
+          onSelect={() => setSelectedIcon('sentry-test')}
+        />
         <DesktopIcon
           id="install-guide"
           label="Install Guide"

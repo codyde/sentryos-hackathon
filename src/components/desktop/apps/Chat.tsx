@@ -2,11 +2,21 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { Send, Bot, User, Loader2, Wrench, Search, Globe, FileText, Terminal } from 'lucide-react'
-import * as Sentry from '@sentry/nextjs'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import * as Sentry from '@sentry/nextjs'
+import {
+  logChatEvent,
+  logToolExecution,
+  addChatBreadcrumb,
+  incrementCounter,
+  recordDistribution,
+  setGauge,
+  Timer,
+  METRICS
+} from '@/lib/sentry-utils'
 
 interface Message {
   id: string
@@ -59,6 +69,7 @@ export function Chat() {
   const [currentTool, setCurrentTool] = useState<ToolStatus | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const [sessionId] = useState(() => crypto.randomUUID())
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -68,10 +79,33 @@ export function Chat() {
     scrollToBottom()
   }, [messages, currentTool])
 
+  // Session tracking
+  useEffect(() => {
+    // Initialize session
+    Sentry.setContext('chat_session', {
+      session_id: sessionId,
+      started_at: new Date().toISOString()
+    })
+
+    logChatEvent('session_start', sessionId)
+    addChatBreadcrumb('session_start')
+
+    setGauge(METRICS.CHAT.ACTIVE_SESSIONS, 1)
+
+    return () => {
+      // Cleanup session
+      logChatEvent('session_end', sessionId, {
+        total_messages: messages.length
+      })
+      setGauge(METRICS.CHAT.ACTIVE_SESSIONS, 0)
+    }
+  }, [sessionId, messages.length])
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!input.trim() || isLoading) return
 
+    const requestTimer = new Timer()
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -79,15 +113,35 @@ export function Chat() {
       timestamp: new Date()
     }
 
+    // Log message sent
+    logChatEvent('message_sent', userMessage.id, {
+      session_id: sessionId,
+      message_length: input.trim().length,
+      message_preview: input.trim().substring(0, 50)
+    })
+
+    addChatBreadcrumb('message_sent', input.trim())
+
+    incrementCounter(METRICS.CHAT.MESSAGE_SENT, {
+      session_id: sessionId
+    })
+
+    Sentry.setContext('current_message', {
+      message_id: userMessage.id,
+      role: 'user',
+      timestamp: userMessage.timestamp.toISOString()
+    })
+
     setMessages(prev => [...prev, userMessage])
     setInput('')
     setIsLoading(true)
     setCurrentTool(null)
 
-    Sentry.logger.info('User sent chat message, conversation length: %d', [messages.length + 1])
-    Sentry.metrics.increment('chat.client.message_sent', 1)
-
     try {
+      logChatEvent('api_request_start', userMessage.id, {
+        session_id: sessionId
+      })
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
@@ -102,6 +156,21 @@ export function Chat() {
       })
 
       if (!response.ok) {
+        const apiDuration = requestTimer.stop()
+
+        Sentry.logger.error('Chat API request failed', {
+          session_id: sessionId,
+          message_id: userMessage.id,
+          status: response.status,
+          status_text: response.statusText,
+          duration_ms: apiDuration
+        })
+
+        recordDistribution(METRICS.CHAT.API_DURATION, apiDuration, 'millisecond', {
+          status: 'error',
+          status_code: String(response.status)
+        })
+
         throw new Error('Failed to get response')
       }
 
@@ -111,10 +180,17 @@ export function Chat() {
         throw new Error('No response body')
       }
 
+      const streamTimer = new Timer()
       const decoder = new TextDecoder()
       let streamingContent = ''
+      let toolExecutionTimes = new Map<string, Timer>()
       const streamingMessageId = crypto.randomUUID()
-      
+
+      logChatEvent('stream_start', streamingMessageId, {
+        session_id: sessionId,
+        parent_message: userMessage.id
+      })
+
       // Add a placeholder message for streaming content
       setMessages(prev => [...prev, {
         id: streamingMessageId,
@@ -137,20 +213,43 @@ export function Chat() {
 
             try {
               const parsed = JSON.parse(data)
-              
+
               if (parsed.type === 'text_delta') {
+                // First text delta marks end of tool execution
+                if (currentTool) {
+                  const toolName = currentTool.name
+                  const toolTimer = toolExecutionTimes.get(toolName)
+                  if (toolTimer) {
+                    const duration = toolTimer.stop()
+                    logToolExecution(toolName, 'complete', duration)
+                    recordDistribution(METRICS.CHAT.TOOL_EXECUTION, duration, 'millisecond', {
+                      tool_name: toolName,
+                      status: 'complete'
+                    })
+                    toolExecutionTimes.delete(toolName)
+                  }
+                }
+
                 // Append streaming text
                 streamingContent += parsed.text
-                setCurrentTool(null) // Clear tool status when text starts flowing
-                // Update the streaming message
-                setMessages(prev => prev.map(msg => 
-                  msg.id === streamingMessageId 
+                setCurrentTool(null)
+                setMessages(prev => prev.map(msg =>
+                  msg.id === streamingMessageId
                     ? { ...msg, content: streamingContent }
                     : msg
                 ))
               } else if (parsed.type === 'tool_start') {
-                Sentry.logger.info('Tool execution started: %s', [parsed.tool])
-                Sentry.metrics.increment('chat.client.tool_execution', 1, { tags: { tool: parsed.tool } })
+                const toolTimer = new Timer()
+                toolExecutionTimes.set(parsed.tool, toolTimer)
+
+                logToolExecution(parsed.tool, 'start')
+                addChatBreadcrumb('tool_execution', parsed.tool)
+
+                incrementCounter(METRICS.CHAT.TOOL_EXECUTION, {
+                  tool_name: parsed.tool,
+                  status: 'start'
+                })
+
                 setCurrentTool({
                   name: parsed.tool,
                   status: 'running'
@@ -160,15 +259,57 @@ export function Chat() {
                   ...prev,
                   elapsed: parsed.elapsed
                 } : null)
+
+                // Log periodic progress at debug level
+                Sentry.logger.debug('Tool execution progress', {
+                  tool_name: parsed.tool,
+                  elapsed_time: parsed.elapsed
+                })
               } else if (parsed.type === 'done') {
-                Sentry.logger.info('Chat response stream completed')
-                Sentry.metrics.increment('chat.client.response_received', 1)
+                const streamDuration = streamTimer.stop()
+                const apiDuration = requestTimer.stop()
+
+                logChatEvent('response_complete', streamingMessageId, {
+                  session_id: sessionId,
+                  stream_duration_ms: streamDuration,
+                  total_api_duration_ms: apiDuration,
+                  response_length: streamingContent.length
+                })
+
+                addChatBreadcrumb('response_received')
+
+                incrementCounter(METRICS.CHAT.RESPONSE_RECEIVED, {
+                  session_id: sessionId
+                })
+
+                recordDistribution(METRICS.CHAT.STREAM_DURATION, streamDuration, 'millisecond', {
+                  status: 'success'
+                })
+
+                recordDistribution(METRICS.CHAT.API_DURATION, apiDuration, 'millisecond', {
+                  status: 'success',
+                  status_code: '200'
+                })
+
                 setCurrentTool(null)
               } else if (parsed.type === 'error') {
-                Sentry.logger.error('Chat stream returned error: %s', [parsed.message])
+                const streamDuration = streamTimer.stop()
+                const apiDuration = requestTimer.stop()
+
+                Sentry.logger.error('Chat stream error', {
+                  session_id: sessionId,
+                  message_id: streamingMessageId,
+                  stream_duration_ms: streamDuration,
+                  total_duration_ms: apiDuration
+                })
+
+                recordDistribution(METRICS.CHAT.STREAM_DURATION, streamDuration, 'millisecond', {
+                  status: 'error'
+                })
+
                 streamingContent = 'Sorry, I encountered an error processing your request.'
-                setMessages(prev => prev.map(msg => 
-                  msg.id === streamingMessageId 
+                setMessages(prev => prev.map(msg =>
+                  msg.id === streamingMessageId
                     ? { ...msg, content: streamingContent }
                     : msg
                 ))
@@ -176,6 +317,7 @@ export function Chat() {
               }
             } catch {
               // Ignore parse errors for incomplete chunks
+              Sentry.logger.debug('Failed to parse SSE chunk')
             }
           }
         }
@@ -186,9 +328,36 @@ export function Chat() {
         setMessages(prev => prev.filter(msg => msg.id !== streamingMessageId))
       }
     } catch (error) {
-      Sentry.logger.error('Chat fetch error: %s', [error instanceof Error ? error.message : String(error)])
-      Sentry.metrics.increment('chat.client.errors', 1)
-      Sentry.captureException(error)
+      const apiDuration = requestTimer.stop()
+
+      Sentry.logger.error('Chat request failed', {
+        session_id: sessionId,
+        message_id: userMessage.id,
+        duration_ms: apiDuration,
+        error: String(error)
+      })
+
+      // Capture exception with context
+      Sentry.captureException(error, {
+        tags: {
+          feature: 'chat',
+          session_id: sessionId
+        },
+        contexts: {
+          chat_context: {
+            message_id: userMessage.id,
+            message_length: userMessage.content.length,
+            total_messages: messages.length,
+            duration_ms: apiDuration
+          }
+        }
+      })
+
+      recordDistribution(METRICS.CHAT.API_DURATION, apiDuration, 'millisecond', {
+        status: 'error',
+        error_type: 'network_error'
+      })
+
       const errorMessage: Message = {
         id: crypto.randomUUID(),
         role: 'assistant',
