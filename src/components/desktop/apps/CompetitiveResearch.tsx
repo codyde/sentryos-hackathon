@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { Send, Bot, User, Loader2, Wrench, Search, Globe, FileText, Terminal } from 'lucide-react'
+import { Send, Bot, User, Loader2, Wrench, Search, Globe, FileText, Terminal, Swords } from 'lucide-react'
 import * as Sentry from '@sentry/nextjs'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -21,7 +21,6 @@ interface ToolStatus {
   elapsed?: number
 }
 
-// Map tool names to friendly display names and icons
 const toolDisplayInfo: Record<string, { name: string; icon: 'search' | 'globe' | 'file' | 'terminal' | 'wrench' }> = {
   'WebSearch': { name: 'Web Search', icon: 'search' },
   'WebFetch': { name: 'Fetching URL', icon: 'globe' },
@@ -45,12 +44,27 @@ const ToolIcon = ({ type }: { type: 'search' | 'globe' | 'file' | 'terminal' | '
   }
 }
 
-export function Chat() {
+const QUICK_PROMPTS = [
+  'Compare Sentry vs Datadog',
+  'Compare Sentry vs New Relic',
+  'Compare Sentry vs Bugsnag',
+  'Sentry pricing vs competitors',
+]
+
+export function CompetitiveResearch() {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: 'welcome',
       role: 'assistant',
-      content: 'Hello! I\'m the SentryOS AI Assistant. How can I help you today?',
+      content: `Welcome to the **Competitive Research Agent**. I can help you compare Sentry against competitors in the error monitoring and observability space.
+
+Ask me about:
+- **Feature comparisons** - "How does Sentry compare to Datadog for error tracking?"
+- **Pricing analysis** - "Compare Sentry and New Relic pricing models"
+- **Developer experience** - "Which has better Python SDK support, Sentry or Rollbar?"
+- **Market positioning** - "What are Sentry's key differentiators vs Bugsnag?"
+
+I'll search for the latest information and provide balanced, factual analysis.`,
       timestamp: new Date()
     }
   ])
@@ -68,14 +82,13 @@ export function Chat() {
     scrollToBottom()
   }, [messages, currentTool])
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!input.trim() || isLoading) return
+  const sendMessage = async (messageText: string) => {
+    if (!messageText.trim() || isLoading) return
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: input.trim(),
+      content: messageText.trim(),
       timestamp: new Date()
     }
 
@@ -84,11 +97,11 @@ export function Chat() {
     setIsLoading(true)
     setCurrentTool(null)
 
-    Sentry.logger.info('User sent chat message, conversation length: %d', [messages.length + 1])
-    Sentry.metrics?.increment?.('chat.client.message_sent', 1)
+    Sentry.logger.info('User sent competitive research query, conversation length: %d', [messages.length + 1])
+    Sentry.metrics?.increment?.('competitive_research.client.message_sent', 1)
 
     try {
-      const response = await fetch('/api/chat', {
+      const response = await fetch('/api/competitive-research', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -105,7 +118,6 @@ export function Chat() {
         throw new Error('Failed to get response')
       }
 
-      // Handle SSE streaming response
       const reader = response.body?.getReader()
       if (!reader) {
         throw new Error('No response body')
@@ -114,8 +126,7 @@ export function Chat() {
       const decoder = new TextDecoder()
       let streamingContent = ''
       const streamingMessageId = crypto.randomUUID()
-      
-      // Add a placeholder message for streaming content
+
       setMessages(prev => [...prev, {
         id: streamingMessageId,
         role: 'assistant',
@@ -137,20 +148,18 @@ export function Chat() {
 
             try {
               const parsed = JSON.parse(data)
-              
+
               if (parsed.type === 'text_delta') {
-                // Append streaming text
                 streamingContent += parsed.text
-                setCurrentTool(null) // Clear tool status when text starts flowing
-                // Update the streaming message
-                setMessages(prev => prev.map(msg => 
-                  msg.id === streamingMessageId 
+                setCurrentTool(null)
+                setMessages(prev => prev.map(msg =>
+                  msg.id === streamingMessageId
                     ? { ...msg, content: streamingContent }
                     : msg
                 ))
               } else if (parsed.type === 'tool_start') {
                 Sentry.logger.info('Tool execution started: %s', [parsed.tool])
-                Sentry.metrics?.increment?.('chat.client.tool_execution', 1, { tags: { tool: parsed.tool } })
+                Sentry.metrics?.increment?.('competitive_research.client.tool_execution', 1, { tags: { tool: parsed.tool } })
                 setCurrentTool({
                   name: parsed.tool,
                   status: 'running'
@@ -161,14 +170,14 @@ export function Chat() {
                   elapsed: parsed.elapsed
                 } : null)
               } else if (parsed.type === 'done') {
-                Sentry.logger.info('Chat response stream completed')
-                Sentry.metrics?.increment?.('chat.client.response_received', 1)
+                Sentry.logger.info('Competitive research response stream completed')
+                Sentry.metrics?.increment?.('competitive_research.client.response_received', 1)
                 setCurrentTool(null)
               } else if (parsed.type === 'error') {
-                Sentry.logger.error('Chat stream returned error: %s', [parsed.message])
+                Sentry.logger.error('Competitive research stream returned error: %s', [parsed.message])
                 streamingContent = 'Sorry, I encountered an error processing your request.'
-                setMessages(prev => prev.map(msg => 
-                  msg.id === streamingMessageId 
+                setMessages(prev => prev.map(msg =>
+                  msg.id === streamingMessageId
                     ? { ...msg, content: streamingContent }
                     : msg
                 ))
@@ -181,13 +190,12 @@ export function Chat() {
         }
       }
 
-      // If no content was streamed, remove the placeholder
       if (!streamingContent) {
         setMessages(prev => prev.filter(msg => msg.id !== streamingMessageId))
       }
     } catch (error) {
-      Sentry.logger.error('Chat fetch error: %s', [error instanceof Error ? error.message : String(error)])
-      Sentry.metrics?.increment?.('chat.client.errors', 1)
+      Sentry.logger.error('Competitive research fetch error: %s', [error instanceof Error ? error.message : String(error)])
+      Sentry.metrics?.increment?.('competitive_research.client.errors', 1)
       Sentry.captureException(error)
       const errorMessage: Message = {
         id: crypto.randomUUID(),
@@ -202,6 +210,11 @@ export function Chat() {
     }
   }
 
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    await sendMessage(input)
+  }
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -213,8 +226,8 @@ export function Chat() {
     <div className="h-full flex flex-col bg-[#1e1a2a]">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-[#362552] bg-[#2a2438]">
-        <Bot className="w-5 h-5 text-[#7553ff]" />
-        <span className="text-sm text-[#e8e4f0]">SentryOS Assistant</span>
+        <Swords className="w-5 h-5 text-[#ff45a8]" />
+        <span className="text-sm text-[#e8e4f0]">Competitive Research</span>
         <span className="ml-auto text-xs text-[#9086a3]">Powered by Claude</span>
       </div>
 
@@ -231,7 +244,7 @@ export function Chat() {
               {message.role === 'user' ? (
                 <User className="w-4 h-4 text-[#ff45a8]" />
               ) : (
-                <Bot className="w-4 h-4 text-[#7553ff]" />
+                <Swords className="w-4 h-4 text-[#7553ff]" />
               )}
             </div>
             <div
@@ -327,7 +340,7 @@ export function Chat() {
         {isLoading && (
           <div className="flex gap-3">
             <div className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-[#7553ff]/20">
-              <Bot className="w-4 h-4 text-[#7553ff]" />
+              <Swords className="w-4 h-4 text-[#7553ff]" />
             </div>
             <div className="bg-[#2a2438] rounded-lg px-3 py-2 space-y-2">
               {currentTool ? (
@@ -348,7 +361,7 @@ export function Chat() {
               ) : (
                 <div className="flex items-center gap-2">
                   <Loader2 className="w-4 h-4 text-[#7553ff] animate-spin" />
-                  <span className="text-sm text-[#9086a3]">Thinking...</span>
+                  <span className="text-sm text-[#9086a3]">Researching...</span>
                 </div>
               )}
             </div>
@@ -358,6 +371,21 @@ export function Chat() {
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Quick prompts - only show when no user messages yet */}
+      {messages.length === 1 && !isLoading && (
+        <div className="px-4 pb-2 flex flex-wrap gap-2">
+          {QUICK_PROMPTS.map((prompt) => (
+            <button
+              key={prompt}
+              onClick={() => sendMessage(prompt)}
+              className="text-xs px-3 py-1.5 rounded-full border border-[#362552] text-[#9086a3] hover:text-[#e8e4f0] hover:border-[#7553ff] hover:bg-[#7553ff]/10 transition-colors"
+            >
+              {prompt}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Input */}
       <form onSubmit={handleSubmit} className="p-3 border-t border-[#362552] bg-[#2a2438]">
         <div className="flex gap-2">
@@ -366,7 +394,7 @@ export function Chat() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Type a message..."
+            placeholder="Ask about Sentry vs competitors..."
             className="flex-1 bg-[#1e1a2a] text-[#e8e4f0] text-sm rounded px-3 py-2 border border-[#362552] focus:border-[#7553ff] focus:outline-none resize-none placeholder:text-[#9086a3]"
             rows={2}
             disabled={isLoading}
