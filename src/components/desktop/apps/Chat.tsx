@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
+import * as Sentry from '@sentry/nextjs'
 import { Send, Bot, User, Loader2, Wrench, Search, Globe, FileText, Terminal } from 'lucide-react'
 import * as Sentry from '@sentry/nextjs'
 import ReactMarkdown from 'react-markdown'
@@ -72,12 +73,19 @@ export function Chat() {
     e.preventDefault()
     if (!input.trim() || isLoading) return
 
+    const startTime = performance.now()
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: 'user',
       content: input.trim(),
       timestamp: new Date()
     }
+
+    Sentry.logger.info('User sent message', {
+      message_length: userMessage.content.length,
+      message_id: userMessage.id
+    })
+    Sentry.metrics.count('chat.message_sent', 1)
 
     setMessages(prev => [...prev, userMessage])
     setInput('')
@@ -102,6 +110,8 @@ export function Chat() {
       })
 
       if (!response.ok) {
+        Sentry.logger.error('Chat API returned error status', { status: response.status })
+        Sentry.metrics.count('chat.api_error', 1, { attributes: { status: response.status.toString() } })
         throw new Error('Failed to get response')
       }
 
@@ -184,11 +194,29 @@ export function Chat() {
       // If no content was streamed, remove the placeholder
       if (!streamingContent) {
         setMessages(prev => prev.filter(msg => msg.id !== streamingMessageId))
+      } else {
+        const duration = performance.now() - startTime
+        Sentry.logger.info('Chat response received', {
+          response_length: streamingContent.length,
+          duration_ms: duration
+        })
+        Sentry.metrics.distribution('chat.client_response_time', duration, {
+          unit: 'millisecond',
+          attributes: { status: 'success' }
+        })
+        Sentry.metrics.count('chat.message_received', 1)
       }
     } catch (error) {
-      Sentry.logger.error('Chat fetch error: %s', [error instanceof Error ? error.message : String(error)])
-      Sentry.metrics.increment('chat.client.errors', 1)
-      Sentry.captureException(error)
+      const duration = performance.now() - startTime
+      Sentry.logger.error('Chat error occurred', {
+        error: error instanceof Error ? error.message : String(error),
+        duration_ms: duration
+      })
+      Sentry.metrics.count('chat.client_error', 1)
+      Sentry.metrics.distribution('chat.client_response_time', duration, {
+        unit: 'millisecond',
+        attributes: { status: 'error' }
+      })
       const errorMessage: Message = {
         id: crypto.randomUUID(),
         role: 'assistant',

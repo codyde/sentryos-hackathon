@@ -1,6 +1,8 @@
 'use client'
 
 import dynamic from 'next/dynamic'
+import { useEffect } from 'react'
+import * as Sentry from '@sentry/nextjs'
 
 const Desktop = dynamic(
   () => import('@/components/desktop/Desktop').then(mod => mod.Desktop),
@@ -15,5 +17,10 @@ const Desktop = dynamic(
 )
 
 export default function Home() {
+  useEffect(() => {
+    Sentry.logger.info('SentryOS application loaded')
+    Sentry.metrics.count('app.page_load', 1)
+  }, [])
+
   return <Desktop />
 }
