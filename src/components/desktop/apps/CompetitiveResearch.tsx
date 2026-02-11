@@ -98,7 +98,7 @@ I'll search for the latest information and provide balanced, factual analysis.`,
     setCurrentTool(null)
 
     Sentry.logger.info('User sent competitive research query, conversation length: %d', [messages.length + 1])
-    Sentry.metrics.increment('competitive_research.client.message_sent', 1)
+    Sentry.metrics?.increment?.('competitive_research.client.message_sent', 1)
 
     try {
       const response = await fetch('/api/competitive-research', {
@@ -159,7 +159,7 @@ I'll search for the latest information and provide balanced, factual analysis.`,
                 ))
               } else if (parsed.type === 'tool_start') {
                 Sentry.logger.info('Tool execution started: %s', [parsed.tool])
-                Sentry.metrics.increment('competitive_research.client.tool_execution', 1, { tags: { tool: parsed.tool } })
+                Sentry.metrics?.increment?.('competitive_research.client.tool_execution', 1, { tags: { tool: parsed.tool } })
                 setCurrentTool({
                   name: parsed.tool,
                   status: 'running'
@@ -171,7 +171,7 @@ I'll search for the latest information and provide balanced, factual analysis.`,
                 } : null)
               } else if (parsed.type === 'done') {
                 Sentry.logger.info('Competitive research response stream completed')
-                Sentry.metrics.increment('competitive_research.client.response_received', 1)
+                Sentry.metrics?.increment?.('competitive_research.client.response_received', 1)
                 setCurrentTool(null)
               } else if (parsed.type === 'error') {
                 Sentry.logger.error('Competitive research stream returned error: %s', [parsed.message])
@@ -195,7 +195,7 @@ I'll search for the latest information and provide balanced, factual analysis.`,
       }
     } catch (error) {
       Sentry.logger.error('Competitive research fetch error: %s', [error instanceof Error ? error.message : String(error)])
-      Sentry.metrics.increment('competitive_research.client.errors', 1)
+      Sentry.metrics?.increment?.('competitive_research.client.errors', 1)
       Sentry.captureException(error)
       const errorMessage: Message = {
         id: crypto.randomUUID(),
