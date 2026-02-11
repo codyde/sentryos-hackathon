@@ -35,7 +35,7 @@ export async function POST(request: Request) {
 
     if (!messages || !Array.isArray(messages)) {
       Sentry.logger.warn('Competitive research request received with invalid messages payload')
-      Sentry.metrics.increment('competitive_research.requests', 1, { tags: { status: 'invalid' } })
+      Sentry.metrics?.increment?.('competitive_research.requests', 1, { tags: { status: 'invalid' } })
       return new Response(
         JSON.stringify({ error: 'Messages array is required' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
@@ -45,7 +45,7 @@ export async function POST(request: Request) {
     const lastUserMessage = messages.filter(m => m.role === 'user').pop()
     if (!lastUserMessage) {
       Sentry.logger.warn('Competitive research request received with no user message')
-      Sentry.metrics.increment('competitive_research.requests', 1, { tags: { status: 'invalid' } })
+      Sentry.metrics?.increment?.('competitive_research.requests', 1, { tags: { status: 'invalid' } })
       return new Response(
         JSON.stringify({ error: 'No user message found' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
@@ -53,8 +53,8 @@ export async function POST(request: Request) {
     }
 
     Sentry.logger.info('Competitive research request received with %d messages', [messages.length])
-    Sentry.metrics.increment('competitive_research.requests', 1, { tags: { status: 'started' } })
-    Sentry.metrics.distribution('competitive_research.messages_per_request', messages.length)
+    Sentry.metrics?.increment?.('competitive_research.requests', 1, { tags: { status: 'started' } })
+    Sentry.metrics?.distribution?.('competitive_research.messages_per_request', messages.length)
 
     const conversationContext = messages
       .slice(0, -1)
@@ -95,7 +95,7 @@ export async function POST(request: Request) {
                 for (const block of content) {
                   if (block.type === 'tool_use') {
                     Sentry.logger.info('Competitive research tool invoked: %s', [block.name])
-                    Sentry.metrics.increment('competitive_research.tool_invocations', 1, { tags: { tool: block.name } })
+                    Sentry.metrics?.increment?.('competitive_research.tool_invocations', 1, { tags: { tool: block.name } })
                     controller.enqueue(encoder.encode(
                       `data: ${JSON.stringify({ type: 'tool_start', tool: block.name })}\n\n`
                     ))
@@ -112,7 +112,7 @@ export async function POST(request: Request) {
 
             if (message.type === 'result' && message.subtype === 'success') {
               Sentry.logger.info('Competitive research stream completed successfully')
-              Sentry.metrics.increment('competitive_research.requests', 1, { tags: { status: 'success' } })
+              Sentry.metrics?.increment?.('competitive_research.requests', 1, { tags: { status: 'success' } })
               controller.enqueue(encoder.encode(
                 `data: ${JSON.stringify({ type: 'done' })}\n\n`
               ))
@@ -120,7 +120,7 @@ export async function POST(request: Request) {
 
             if (message.type === 'result' && message.subtype !== 'success') {
               Sentry.logger.error('Competitive research query did not complete successfully, subtype: %s', [message.subtype])
-              Sentry.metrics.increment('competitive_research.requests', 1, { tags: { status: 'query_failure' } })
+              Sentry.metrics?.increment?.('competitive_research.requests', 1, { tags: { status: 'query_failure' } })
               controller.enqueue(encoder.encode(
                 `data: ${JSON.stringify({ type: 'error', message: 'Query did not complete successfully' })}\n\n`
               ))
@@ -131,7 +131,7 @@ export async function POST(request: Request) {
           controller.close()
         } catch (error) {
           Sentry.logger.error('Competitive research stream error: %s', [error instanceof Error ? error.message : String(error)])
-          Sentry.metrics.increment('competitive_research.errors', 1, { tags: { phase: 'stream' } })
+          Sentry.metrics?.increment?.('competitive_research.errors', 1, { tags: { phase: 'stream' } })
           Sentry.captureException(error)
           controller.enqueue(encoder.encode(
             `data: ${JSON.stringify({ type: 'error', message: 'Stream error occurred' })}\n\n`
@@ -150,7 +150,7 @@ export async function POST(request: Request) {
     })
   } catch (error) {
     Sentry.logger.error('Competitive research API error: %s', [error instanceof Error ? error.message : String(error)])
-    Sentry.metrics.increment('competitive_research.errors', 1, { tags: { phase: 'request' } })
+    Sentry.metrics?.increment?.('competitive_research.errors', 1, { tags: { phase: 'request' } })
     Sentry.captureException(error)
 
     return new Response(
