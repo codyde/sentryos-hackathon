@@ -1,4 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
+import * as Sentry from '@sentry/nextjs'
+import { logger, metrics, captureException } from '@/lib/sentry-utils'
 
 const SYSTEM_PROMPT = `You are a helpful personal assistant designed to help with general research, questions, and tasks.
 
@@ -22,10 +24,31 @@ interface MessageInput {
 }
 
 export async function POST(request: Request) {
+  const requestStartTime = Date.now()
+
+  // Log request start
+  logger.info('Chat API request started', {
+    timestamp: new Date().toISOString(),
+  })
+
+  // Increment request counter
+  metrics.increment('chat.requests.total', 1, {
+    tags: { endpoint: 'chat' }
+  })
+
   try {
     const { messages } = await request.json() as { messages: MessageInput[] }
 
     if (!messages || !Array.isArray(messages)) {
+      logger.warn('Invalid request: messages array missing', {
+        hasMessages: !!messages,
+        isArray: Array.isArray(messages),
+      })
+
+      metrics.increment('chat.requests.errors', 1, {
+        tags: { error_type: 'invalid_input' }
+      })
+
       return new Response(
         JSON.stringify({ error: 'Messages array is required' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
@@ -35,11 +58,36 @@ export async function POST(request: Request) {
     // Get the last user message
     const lastUserMessage = messages.filter(m => m.role === 'user').pop()
     if (!lastUserMessage) {
+      logger.warn('Invalid request: no user message found', {
+        messageCount: messages.length,
+      })
+
+      metrics.increment('chat.requests.errors', 1, {
+        tags: { error_type: 'no_user_message' }
+      })
+
       return new Response(
         JSON.stringify({ error: 'No user message found' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       )
     }
+
+    // Log message context
+    logger.info('Processing chat message', {
+      messageCount: messages.length,
+      userMessageLength: lastUserMessage.content.length,
+    })
+
+    // Track message metrics
+    metrics.distribution('chat.message.length', lastUserMessage.content.length, {
+      tags: { type: 'user' },
+      unit: 'character'
+    })
+
+    metrics.distribution('chat.conversation.depth', messages.length, {
+      tags: { endpoint: 'chat' },
+      unit: 'message'
+    })
 
     // Build conversation context
     const conversationContext = messages
@@ -53,6 +101,14 @@ export async function POST(request: Request) {
 
     // Create a streaming response
     const encoder = new TextEncoder()
+    const toolsUsed = new Set<string>()
+    let totalTokens = 0
+    let streamStartTime = Date.now()
+
+    logger.info('Starting Claude Agent SDK query', {
+      promptLength: fullPrompt.length,
+    })
+
     const stream = new ReadableStream({
       async start(controller) {
         try {
@@ -89,6 +145,17 @@ export async function POST(request: Request) {
               if (Array.isArray(content)) {
                 for (const block of content) {
                   if (block.type === 'tool_use') {
+                    toolsUsed.add(block.name)
+
+                    logger.info('Tool invoked', {
+                      toolName: block.name,
+                      toolId: block.id,
+                    })
+
+                    metrics.increment('chat.tools.invoked', 1, {
+                      tags: { tool: block.name }
+                    })
+
                     controller.enqueue(encoder.encode(
                       `data: ${JSON.stringify({ type: 'tool_start', tool: block.name })}\n\n`
                     ))
@@ -106,6 +173,24 @@ export async function POST(request: Request) {
 
             // Signal completion
             if (message.type === 'result' && message.subtype === 'success') {
+              const streamDuration = Date.now() - streamStartTime
+
+              logger.info('Query completed successfully', {
+                streamDuration,
+                toolsUsed: Array.from(toolsUsed),
+                toolCount: toolsUsed.size,
+              })
+
+              metrics.distribution('chat.stream.duration', streamDuration, {
+                tags: { status: 'success' },
+                unit: 'millisecond'
+              })
+
+              metrics.distribution('chat.tools.count', toolsUsed.size, {
+                tags: { status: 'success' },
+                unit: 'tool'
+              })
+
               controller.enqueue(encoder.encode(
                 `data: ${JSON.stringify({ type: 'done' })}\n\n`
               ))
@@ -113,16 +198,50 @@ export async function POST(request: Request) {
 
             // Handle errors
             if (message.type === 'result' && message.subtype !== 'success') {
+              logger.error('Query did not complete successfully', {
+                subtype: message.subtype,
+              })
+
+              metrics.increment('chat.query.errors', 1, {
+                tags: { error_type: 'incomplete' }
+              })
+
               controller.enqueue(encoder.encode(
                 `data: ${JSON.stringify({ type: 'error', message: 'Query did not complete successfully' })}\n\n`
               ))
             }
           }
 
+          const requestDuration = Date.now() - requestStartTime
+
+          logger.info('Chat request completed', {
+            requestDuration,
+            totalToolsUsed: toolsUsed.size,
+          })
+
+          metrics.distribution('chat.request.duration', requestDuration, {
+            tags: { status: 'success' },
+            unit: 'millisecond'
+          })
+
+          metrics.increment('chat.requests.success', 1, {
+            tags: { endpoint: 'chat' }
+          })
+
           controller.enqueue(encoder.encode('data: [DONE]\n\n'))
           controller.close()
         } catch (error) {
-          console.error('Stream error:', error)
+          logger.error('Stream error occurred', {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            stack: error instanceof Error ? error.stack : undefined,
+          })
+
+          metrics.increment('chat.stream.errors', 1, {
+            tags: { error_type: 'stream_error' }
+          })
+
+          captureException(error)
+
           controller.enqueue(encoder.encode(
             `data: ${JSON.stringify({ type: 'error', message: 'Stream error occurred' })}\n\n`
           ))
@@ -139,7 +258,24 @@ export async function POST(request: Request) {
       },
     })
   } catch (error) {
-    console.error('Chat API error:', error)
+    const requestDuration = Date.now() - requestStartTime
+
+    logger.error('Chat API error occurred', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined,
+      requestDuration,
+    })
+
+    metrics.increment('chat.requests.errors', 1, {
+      tags: { error_type: 'api_error' }
+    })
+
+    metrics.distribution('chat.request.duration', requestDuration, {
+      tags: { status: 'error' },
+      unit: 'millisecond'
+    })
+
+    captureException(error)
 
     return new Response(
       JSON.stringify({ error: 'Failed to process chat request. Check server logs for details.' }),

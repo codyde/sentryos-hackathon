@@ -6,6 +6,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { logger, metrics, captureException } from '@/lib/sentry-utils'
 
 interface Message {
   id: string
@@ -59,6 +60,22 @@ export function Chat() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
+  // Log component mount
+  useEffect(() => {
+    logger.info('Chat component mounted', {
+      timestamp: new Date().toISOString(),
+    })
+
+    metrics.increment('chat.component.mounted', 1, {
+      tags: { component: 'chat' }
+    })
+
+    return () => {
+      logger.info('Chat component unmounted')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
@@ -71,6 +88,8 @@ export function Chat() {
     e.preventDefault()
     if (!input.trim() || isLoading) return
 
+    const messageStartTime = Date.now()
+
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -78,12 +97,30 @@ export function Chat() {
       timestamp: new Date()
     }
 
+    logger.info('User message submitted', {
+      messageLength: userMessage.content.length,
+      conversationLength: messages.length,
+    })
+
+    metrics.increment('chat.messages.sent', 1, {
+      tags: { role: 'user' }
+    })
+
+    metrics.distribution('chat.user.message.length', userMessage.content.length, {
+      tags: { component: 'chat' },
+      unit: 'character'
+    })
+
     setMessages(prev => [...prev, userMessage])
     setInput('')
     setIsLoading(true)
     setCurrentTool(null)
 
     try {
+      logger.info('Sending request to chat API', {
+        messageCount: messages.length + 1,
+      })
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
@@ -98,6 +135,15 @@ export function Chat() {
       })
 
       if (!response.ok) {
+        logger.error('Chat API request failed', {
+          status: response.status,
+          statusText: response.statusText,
+        })
+
+        metrics.increment('chat.api.errors', 1, {
+          tags: { status: response.status.toString() }
+        })
+
         throw new Error('Failed to get response')
       }
 
@@ -110,7 +156,13 @@ export function Chat() {
       const decoder = new TextDecoder()
       let streamingContent = ''
       const streamingMessageId = crypto.randomUUID()
-      
+      const toolsUsedInResponse = new Set<string>()
+      const firstTokenTime = Date.now()
+
+      logger.info('Starting to receive streaming response', {
+        messageId: streamingMessageId,
+      })
+
       // Add a placeholder message for streaming content
       setMessages(prev => [...prev, {
         id: streamingMessageId,
@@ -139,12 +191,23 @@ export function Chat() {
                 streamingContent += parsed.text
                 setCurrentTool(null) // Clear tool status when text starts flowing
                 // Update the streaming message
-                setMessages(prev => prev.map(msg => 
-                  msg.id === streamingMessageId 
+                setMessages(prev => prev.map(msg =>
+                  msg.id === streamingMessageId
                     ? { ...msg, content: streamingContent }
                     : msg
                 ))
               } else if (parsed.type === 'tool_start') {
+                toolsUsedInResponse.add(parsed.tool)
+
+                logger.info('Tool started in UI', {
+                  toolName: parsed.tool,
+                  messageId: streamingMessageId,
+                })
+
+                metrics.increment('chat.tools.ui.started', 1, {
+                  tags: { tool: parsed.tool }
+                })
+
                 setCurrentTool({
                   name: parsed.tool,
                   status: 'running'
@@ -155,11 +218,50 @@ export function Chat() {
                   elapsed: parsed.elapsed
                 } : null)
               } else if (parsed.type === 'done') {
+                const responseTime = Date.now() - messageStartTime
+                const timeToFirstToken = firstTokenTime - messageStartTime
+
+                logger.info('Message completed successfully', {
+                  responseTime,
+                  timeToFirstToken,
+                  contentLength: streamingContent.length,
+                  toolsUsed: Array.from(toolsUsedInResponse),
+                  toolCount: toolsUsedInResponse.size,
+                })
+
+                metrics.distribution('chat.response.time', responseTime, {
+                  tags: { status: 'success' },
+                  unit: 'millisecond'
+                })
+
+                metrics.distribution('chat.response.length', streamingContent.length, {
+                  tags: { role: 'assistant' },
+                  unit: 'character'
+                })
+
+                metrics.distribution('chat.tools.per_response', toolsUsedInResponse.size, {
+                  tags: { component: 'chat' },
+                  unit: 'tool'
+                })
+
+                metrics.increment('chat.messages.received', 1, {
+                  tags: { role: 'assistant', status: 'success' }
+                })
+
                 setCurrentTool(null)
               } else if (parsed.type === 'error') {
+                logger.error('Error in streaming response', {
+                  errorMessage: parsed.message,
+                  messageId: streamingMessageId,
+                })
+
+                metrics.increment('chat.stream.client.errors', 1, {
+                  tags: { error_type: 'streaming_error' }
+                })
+
                 streamingContent = 'Sorry, I encountered an error processing your request.'
-                setMessages(prev => prev.map(msg => 
-                  msg.id === streamingMessageId 
+                setMessages(prev => prev.map(msg =>
+                  msg.id === streamingMessageId
                     ? { ...msg, content: streamingContent }
                     : msg
                 ))
@@ -174,9 +276,35 @@ export function Chat() {
 
       // If no content was streamed, remove the placeholder
       if (!streamingContent) {
+        logger.warn('No content received in streaming response', {
+          messageId: streamingMessageId,
+        })
+
+        metrics.increment('chat.stream.empty_response', 1, {
+          tags: { component: 'chat' }
+        })
+
         setMessages(prev => prev.filter(msg => msg.id !== streamingMessageId))
       }
-    } catch {
+    } catch (error) {
+      const responseTime = Date.now() - messageStartTime
+
+      logger.error('Chat message error', {
+        error: error instanceof Error ? error.message : 'Unknown error',
+        responseTime,
+      })
+
+      metrics.increment('chat.messages.errors', 1, {
+        tags: { error_type: 'client_error' }
+      })
+
+      metrics.distribution('chat.response.time', responseTime, {
+        tags: { status: 'error' },
+        unit: 'millisecond'
+      })
+
+      captureException(error)
+
       const errorMessage: Message = {
         id: crypto.randomUUID(),
         role: 'assistant',

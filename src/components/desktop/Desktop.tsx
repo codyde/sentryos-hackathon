@@ -7,7 +7,9 @@ import { DesktopIcon } from './DesktopIcon'
 import { Notepad } from './apps/Notepad'
 import { FolderView, FolderItem } from './apps/FolderView'
 import { Chat } from './apps/Chat'
-import { useState } from 'react'
+import { Banking } from './apps/Banking'
+import { useState, useEffect } from 'react'
+import { logger, metrics } from '@/lib/sentry-utils'
 
 const INSTALL_GUIDE_CONTENT = `# SentryOS Install Guide
 
@@ -58,7 +60,37 @@ function DesktopContent() {
   const { windows, openWindow } = useWindowManager()
   const [selectedIcon, setSelectedIcon] = useState<string | null>(null)
 
+  // Log desktop initialization
+  useEffect(() => {
+    logger.info('Desktop environment initialized', {
+      timestamp: new Date().toISOString(),
+      userAgent: navigator.userAgent,
+    })
+
+    metrics.increment('desktop.initialized', 1, {
+      tags: { component: 'desktop' }
+    })
+
+    return () => {
+      logger.info('Desktop environment unmounted')
+    }
+  }, [])
+
+  // Track open windows count
+  useEffect(() => {
+    metrics.gauge('desktop.windows.open', windows.length, {
+      tags: { component: 'desktop' }
+    })
+  }, [windows.length])
+
   const openInstallGuide = () => {
+    logger.info('Opening Install Guide', {
+      windowId: 'install-guide',
+    })
+
+    metrics.increment('desktop.window.opened', 1, {
+      tags: { window: 'install-guide' }
+    })
     openWindow({
       id: 'install-guide',
       title: 'Install Guide.md',
@@ -76,6 +108,14 @@ function DesktopContent() {
   }
 
   const openChatWindow = () => {
+    logger.info('Opening Chat window', {
+      windowId: 'chat',
+    })
+
+    metrics.increment('desktop.window.opened', 1, {
+      tags: { window: 'chat' }
+    })
+
     openWindow({
       id: 'chat',
       title: 'SentryOS Chat',
@@ -92,7 +132,40 @@ function DesktopContent() {
     })
   }
 
+  const openBanking = () => {
+    logger.info('Opening Banking app', {
+      windowId: 'banking',
+    })
+
+    metrics.increment('desktop.window.opened', 1, {
+      tags: { window: 'banking' }
+    })
+
+    openWindow({
+      id: 'banking',
+      title: 'SentryBank',
+      icon: '🏦',
+      x: 250,
+      y: 100,
+      width: 500,
+      height: 600,
+      minWidth: 400,
+      minHeight: 500,
+      isMinimized: false,
+      isMaximized: false,
+      content: <Banking />
+    })
+  }
+
   const openAgentsFolder = () => {
+    logger.info('Opening Agents folder', {
+      windowId: 'agents-folder',
+    })
+
+    metrics.increment('desktop.window.opened', 1, {
+      tags: { window: 'agents-folder' }
+    })
+
     const agentsFolderItems: FolderItem[] = []
 
     openWindow({
@@ -161,6 +234,14 @@ function DesktopContent() {
           onDoubleClick={openChatWindow}
           selected={selectedIcon === 'chat'}
           onSelect={() => setSelectedIcon('chat')}
+        />
+        <DesktopIcon
+          id="banking"
+          label="SentryBank"
+          icon="document"
+          onDoubleClick={openBanking}
+          selected={selectedIcon === 'banking'}
+          onSelect={() => setSelectedIcon('banking')}
         />
       </div>
 
