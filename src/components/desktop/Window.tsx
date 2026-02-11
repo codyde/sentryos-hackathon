@@ -5,6 +5,8 @@ import { Rnd } from 'react-rnd'
 import { X, Minus, Square, Copy } from 'lucide-react'
 import { WindowState } from './types'
 import { useWindowManager } from './WindowManager'
+import { useSentryMetrics, useSentryBreadcrumbs } from '@/lib/hooks'
+import { WindowErrorBoundary } from './WindowErrorBoundary'
 
 interface WindowProps {
   window: WindowState
@@ -21,6 +23,10 @@ export function Window({ window: win }: WindowProps) {
   } = useWindowManager()
 
   const [mounted, setMounted] = useState(false)
+
+  // Initialize observability hooks
+  const metrics = useSentryMetrics()
+  const breadcrumbs = useSentryBreadcrumbs()
 
   useEffect(() => {
     setMounted(true)
@@ -51,11 +57,15 @@ export function Window({ window: win }: WindowProps) {
       onDragStart={() => focusWindow(win.id)}
       onDragStop={(_e, d) => {
         if (!win.isMaximized) {
+          metrics.trackWindowDrag(win.id)
+          breadcrumbs.logWindowDrag(win.id, win.title, d.x, d.y)
           updateWindowPosition(win.id, d.x, d.y)
         }
       }}
       onResizeStop={(_e, _dir, ref, _delta, pos) => {
         if (!win.isMaximized) {
+          metrics.trackWindowResize(win.id)
+          breadcrumbs.logWindowResize(win.id, win.title, ref.offsetWidth, ref.offsetHeight)
           updateWindowSize(win.id, ref.offsetWidth, ref.offsetHeight)
           updateWindowPosition(win.id, pos.x, pos.y)
         }
@@ -114,7 +124,9 @@ export function Window({ window: win }: WindowProps) {
 
         {/* Content */}
         <div className="flex-1 overflow-auto">
-          {win.content}
+          <WindowErrorBoundary windowId={win.id} windowTitle={win.title}>
+            {win.content}
+          </WindowErrorBoundary>
         </div>
       </div>
     </Rnd>

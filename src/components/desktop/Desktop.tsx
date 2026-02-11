@@ -8,7 +8,8 @@ import { Notepad } from './apps/Notepad'
 import { FolderView, FolderItem } from './apps/FolderView'
 import { Chat } from './apps/Chat'
 import { useState } from 'react'
-import * as Sentry from '@sentry/nextjs'
+import { useSentryBreadcrumbs } from '@/lib/hooks'
+import { WindowManagerErrorBoundary, ChatErrorBoundary } from './errors'
 
 const INSTALL_GUIDE_CONTENT = `# SentryOS Install Guide
 
@@ -59,9 +60,10 @@ function DesktopContent() {
   const { windows, openWindow } = useWindowManager()
   const [selectedIcon, setSelectedIcon] = useState<string | null>(null)
 
+  // Initialize observability hooks
+  const breadcrumbs = useSentryBreadcrumbs()
+
   const openInstallGuide = () => {
-    Sentry.logger.info('App launched: %s', ['Install Guide'])
-    Sentry.metrics.increment('app.launched', 1, { tags: { app: 'install-guide' } })
     openWindow({
       id: 'install-guide',
       title: 'Install Guide.md',
@@ -79,8 +81,6 @@ function DesktopContent() {
   }
 
   const openChatWindow = () => {
-    Sentry.logger.info('App launched: %s', ['Chat'])
-    Sentry.metrics.increment('app.launched', 1, { tags: { app: 'chat' } })
     openWindow({
       id: 'chat',
       title: 'SentryOS Chat',
@@ -93,13 +93,15 @@ function DesktopContent() {
       minHeight: 400,
       isMinimized: false,
       isMaximized: false,
-      content: <Chat />
+      content: (
+        <ChatErrorBoundary>
+          <Chat />
+        </ChatErrorBoundary>
+      )
     })
   }
 
   const openAgentsFolder = () => {
-    Sentry.logger.info('App launched: %s', ['Agents Folder'])
-    Sentry.metrics.increment('app.launched', 1, { tags: { app: 'agents-folder' } })
     const agentsFolderItems: FolderItem[] = []
 
     openWindow({
@@ -119,6 +121,7 @@ function DesktopContent() {
   }
 
   const handleDesktopClick = () => {
+    breadcrumbs.logDesktopClick()
     setSelectedIcon(null)
   }
 
@@ -179,8 +182,10 @@ function DesktopContent() {
 
 export function Desktop() {
   return (
-    <WindowManagerProvider>
-      <DesktopContent />
-    </WindowManagerProvider>
+    <WindowManagerErrorBoundary>
+      <WindowManagerProvider>
+        <DesktopContent />
+      </WindowManagerProvider>
+    </WindowManagerErrorBoundary>
   )
 }

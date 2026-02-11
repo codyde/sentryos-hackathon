@@ -2,6 +2,7 @@
 
 import { useRef } from 'react'
 import { FileText, Folder, Terminal, Settings, MessageCircle } from 'lucide-react'
+import { useSentryMetrics, useSentryBreadcrumbs } from '@/lib/hooks'
 
 interface DesktopIconProps {
   id: string
@@ -21,22 +22,28 @@ const iconMap = {
   chat: MessageCircle,
 }
 
-export function DesktopIcon({ label, icon, onDoubleClick, selected, onSelect }: DesktopIconProps) {
+export function DesktopIcon({ id, label, icon, onDoubleClick, selected, onSelect }: DesktopIconProps) {
   const IconComponent = iconMap[icon] || FileText
   const clickTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const clickCountRef = useRef(0)
 
+  // Initialize observability hooks
+  const metrics = useSentryMetrics()
+  const breadcrumbs = useSentryBreadcrumbs()
+
   const handleClick = (e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    
+
     clickCountRef.current += 1
-    
+
     if (clickCountRef.current === 1) {
       // First click - wait to see if there's a second click
       clickTimeoutRef.current = setTimeout(() => {
         // Single click - just select
         if (clickCountRef.current === 1) {
+          metrics.trackIconClick(id)
+          breadcrumbs.logIconSelect(id, label)
           onSelect?.()
         }
         clickCountRef.current = 0
@@ -47,6 +54,8 @@ export function DesktopIcon({ label, icon, onDoubleClick, selected, onSelect }: 
         clearTimeout(clickTimeoutRef.current)
       }
       clickCountRef.current = 0
+      metrics.trackIconDoubleClick(id)
+      breadcrumbs.logIconDoubleClick(id, label)
       onSelect?.() // Also select on double click
       onDoubleClick()
     }
