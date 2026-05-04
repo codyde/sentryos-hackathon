@@ -61,7 +61,7 @@ function DesktopContent() {
 
   const openInstallGuide = () => {
     Sentry.logger.info('App launched: %s', ['Install Guide'])
-    Sentry.metrics.increment('app.launched', 1, { tags: { app: 'install-guide' } })
+    Sentry.metrics.count('app.launched', 1, { attributes: { app: 'install-guide' } })
     openWindow({
       id: 'install-guide',
       title: 'Install Guide.md',
@@ -80,7 +80,7 @@ function DesktopContent() {
 
   const openChatWindow = () => {
     Sentry.logger.info('App launched: %s', ['Chat'])
-    Sentry.metrics.increment('app.launched', 1, { tags: { app: 'chat' } })
+    Sentry.metrics.count('app.launched', 1, { attributes: { app: 'chat' } })
     openWindow({
       id: 'chat',
       title: 'SentryOS Chat',
@@ -99,7 +99,7 @@ function DesktopContent() {
 
   const openAgentsFolder = () => {
     Sentry.logger.info('App launched: %s', ['Agents Folder'])
-    Sentry.metrics.increment('app.launched', 1, { tags: { app: 'agents-folder' } })
+    Sentry.metrics.count('app.launched', 1, { attributes: { app: 'agents-folder' } })
     const agentsFolderItems: FolderItem[] = []
 
     openWindow({
